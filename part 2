@@ -1,0 +1,91 @@
+# 유턴 탐지 이후 모든 객체를 유턴으로 인식
+
+import cv2
+import numpy as np
+from ultralytics import YOLO
+
+# YOLOv8s 모델 불러오기
+model = YOLO('yolov8s.pt')
+
+# 동영상 파일 열기
+cap = cv2.VideoCapture('D:/carvid/d5.mp4')
+
+# 원본 동영상의 프레임 너비, 높이, FPS 가져오기
+width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+fps = int(cap.get(cv2.CAP_PROP_FPS))
+
+# 결과를 저장할 VideoWriter 설정
+fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+out = cv2.VideoWriter('D:/carvid/result/20241015/d5ver1.mp4', fourcc, fps, (width, height))
+
+# 구역 겹침 시간 저장 변수 초기화
+zone1_overlap_time = -1
+zone2_overlap_time = -1
+time_threshold = 2 * fps  # 2초 이내
+
+frame_count = 0
+
+while cap.isOpened():
+    ret, frame = cap.read()
+    if not ret:
+        break
+
+    # 객체 탐지 수행
+    results = model(frame)
+    boxes = results[0].boxes
+
+    # 노란색 중앙선 검출
+    hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+    lower_yellow = (15, 100, 100)
+    upper_yellow = (35, 255, 255)
+    mask = cv2.inRange(hsv, lower_yellow, upper_yellow)
+
+    # ROI 설정
+    roi = np.zeros_like(mask)
+    roi[int(height / 2):, int(width / 3):] = mask[int(height / 2):, int(width / 3):]
+
+    # 검출한 중앙선을 보라색으로 표시
+    purple_line = cv2.merge([mask, mask, mask])  # 마스크를 3채널로 확장
+    frame = cv2.addWeighted(frame, 1, purple_line, 0.5, 0)
+
+    for box in boxes:
+        x1, y1, x2, y2 = map(int, box.xyxy[0])  # 바운딩 박스 좌표
+        cls = int(box.cls[0])  # 클래스 ID
+        if cls == 2 or cls == 5 or cls == 7:
+
+            # 좌측 하단 모서리 (구역 1) 겹침 확인
+            left_bottom_x = min(x1, width - 1)
+            left_bottom_y = min(y2, height - 1)
+            if np.any(roi[left_bottom_y, left_bottom_x] > 0):
+                zone1_overlap_time = frame_count  # 겹친 시점 기록
+
+            # 우측 하단 모서리 (구역 2) 겹침 확인
+            right_bottom_x = min(x2, width - 1)
+            right_bottom_y = min(y2, height - 1)
+            if np.any(roi[right_bottom_y, right_bottom_x] > 0):
+                zone2_overlap_time = frame_count  # 겹친 시점 기록
+
+            # 유턴 감지 여부에 따른 색상 설정
+            if zone1_overlap_time != -1 and zone2_overlap_time != -1:
+                if abs(zone1_overlap_time - zone2_overlap_time) <= time_threshold:
+                    color = (0, 255, 255)  # 유턴 감지 시 노란색
+                    print(f"유턴 감지 - 좌표 ({left_bottom_x}, {left_bottom_y})와 ({right_bottom_x}, {right_bottom_y}), 유턴 상태")
+                else:
+                    color = (0, 255, 0)  # 기본 상태 초록색
+                    print(f"유턴 미감지 - 좌표 ({left_bottom_x}, {left_bottom_y})와 ({right_bottom_x}, {right_bottom_y})")
+            else:
+                color = (0, 255, 0)  # 기본 상태 초록색
+
+            # 바운딩 박스 및 구역 표시
+            cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
+            cv2.circle(frame, (left_bottom_x, left_bottom_y), 5, (255, 0, 0), -1)
+            cv2.circle(frame, (right_bottom_x, right_bottom_y), 5, (255, 0, 0), -1)
+
+    # 결과 프레임을 저장
+    out.write(frame)
+    frame_count += 1
+
+# 자원 해제
+cap.release()
+out.release()
