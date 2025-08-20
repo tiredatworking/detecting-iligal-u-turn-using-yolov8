@@ -1,0 +1,196 @@
+import math
+import cv2
+import numpy as np
+from ultralytics import YOLO
+from scipy.spatial import distance
+
+# YOLOv8s 모델 불러오기
+model = YOLO('yolov8s.pt')
+
+# 동영상 파일 열기
+cap = cv2.VideoCapture('D:/carvid/d6.mp4')
+
+# 원본 동영상의 프레임 너비, 높이, FPS 가져오기
+width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+fps = int(cap.get(cv2.CAP_PROP_FPS))
+
+# 결과를 저장할 VideoWriter 설정
+fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+out = cv2.VideoWriter('D:/carvid/result/20241015/d6ver5.mp4', fourcc, fps, (width, height))
+
+# 개체별 상태를 저장하는 딕셔너리 초기화
+object_status = {}  # {object_id: {'zone1_overlap_time': int, 'zone2_overlap_time': int, 'u_turn_detected': bool, 'last_position': (x, y)}}
+next_object_id = 0
+
+time_threshold = 2 * fps  # 2초 이내
+frame_count = 0
+distance_threshold = 50  # 동일 객체로 간주할 최대 거리
+
+# 차선 검출을 위한 설정
+MISSING_THRESHOLD = 10  # 차선이 검출되지 않더라도 10 프레임 동안 유지
+missing_frame_count = 0  # 차선이 감지되지 않는 프레임 카운트
+lane_trajectory = []  # 중앙선 궤적을 저장하기 위한 리스트
+
+# 노란색 차선을 검출하기 위한 필터링 및 에지 검출 함수
+def filter_and_detect_edges(image):
+    """이미지에서 노란색 차선을 필터링하고 에지를 검출하는 함수"""
+    if image is None:
+        return None
+
+    # 이미지를 HSV 색 공간으로 변환
+    hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
+
+    # 노란색 범위를 정의 (HSV 값 사용)
+    lower_yellow = np.array([10, 60, 60], np.uint8)
+    upper_yellow = np.array([40, 255, 255], np.uint8)
+
+    # 노란색에 해당하는 영역을 마스크로 추출
+    yellow_mask = cv2.inRange(hsv, lower_yellow, upper_yellow)
+
+    # 노이즈 제거 (작은 객체를 필터링)
+    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5))
+    yellow_mask = cv2.morphologyEx(yellow_mask, cv2.MORPH_CLOSE, kernel)
+
+    # 필터링된 이미지에 Canny Edge Detection 적용
+    yellow_edges = cv2.Canny(yellow_mask, 50, 150)
+
+    return yellow_edges
+
+# 차선을 검출하고 중앙선을 유지하는 함수
+def detect_lane_lines(image):
+    """이미지에서 차선을 검출하고 중앙선의 연속성을 유지하는 함수"""
+    global lane_trajectory, missing_frame_count
+
+    if image is None:
+        return []
+
+    # 노란색 차선 필터 및 에지 검출
+    yellow_edges = filter_and_detect_edges(image)
+
+    if yellow_edges is None:
+        return []
+
+    # HoughLinesP를 사용하여 직선 검출
+    lines = cv2.HoughLinesP(yellow_edges, 1, np.pi / 180, 50, minLineLength=100, maxLineGap=50)
+
+    # 차선이 감지되지 않으면 missing_frame_count 증가
+    if lines is None:
+        missing_frame_count += 1
+        if missing_frame_count > MISSING_THRESHOLD:
+            return lane_trajectory
+        else:
+            return []
+
+    valid_lines = []
+    height, width = image.shape[:2]
+
+    # 검출된 직선 중 유효한 중앙선만 선택
+    for line in lines:
+        x1, y1, x2, y2 = line[0]
+        # 화면 중앙에 가까운 선만 선택 (너무 좌우로 치우친 선은 무시)
+        if 0.25 * width < (x1 + x2) / 2 < 0.75 * width:
+            valid_lines.append((x1, y1, x2, y2))
+
+    # 유효한 차선이 있으면 궤적을 업데이트
+    if len(valid_lines) > 0:
+        lane_trajectory = valid_lines
+        missing_frame_count = 0  # 차선이 검출되었으므로 카운트 리셋
+
+    return lane_trajectory
+
+while cap.isOpened():
+    ret, frame = cap.read()
+    if not ret:
+        break
+
+    # 객체 탐지 수행
+    results = model(frame)
+    boxes = results[0].boxes.cpu().numpy()
+
+    # 노란색 차선 검출을 통한 ROI 설정
+    lane_lines = detect_lane_lines(frame)
+    roi = np.zeros((height, width), dtype=np.uint8)
+
+    # ROI에 차선을 그려 영역을 설정
+    for line in lane_lines:
+        x1, y1, x2, y2 = line
+        cv2.line(roi, (x1, y1), (x2, y2), 255, 2)
+
+    # 현재 프레임에서 감지된 객체의 위치를 추적하여 이전 프레임과 매칭
+    current_objects = {}
+
+    for box in boxes:
+        x1, y1, x2, y2 = map(int, box.xyxy[0])  # 바운딩 박스 좌표
+        cls = int(box.cls[0])  # 클래스 ID
+        if cls not in [2, 5, 7]:  # 차량 클래스만 필터링
+            continue
+
+        # 개체 중심 좌표 계산
+        center_x = (x1 + x2) // 2
+        center_y = (y1 + y2) // 2
+        center = (center_x, center_y)
+
+        # 기존 객체와의 거리 계산하여 가장 가까운 객체를 찾음
+        min_dist = float('inf')
+        matched_id = None
+        for obj_id, status in object_status.items():
+            prev_center = status['last_position']
+            dist = distance.euclidean(center, prev_center)
+            if dist < min_dist and dist < distance_threshold:
+                min_dist = dist
+                matched_id = obj_id
+
+        # 가장 가까운 객체로 ID 매칭, 없으면 새 ID 할당
+        if matched_id is None:
+            matched_id = f"{cls}_{next_object_id}"
+            object_status[matched_id] = {
+                'zone1_overlap_time': -1,
+                'zone2_overlap_time': -1,
+                'u_turn_detected': False,
+                'last_position': center
+            }
+            next_object_id += 1
+        else:
+            object_status[matched_id]['last_position'] = center
+
+        # 현재 프레임에 있는 객체에 추가
+        current_objects[matched_id] = object_status[matched_id]
+
+        # 유턴 상태가 이미 감지된 경우
+        if object_status[matched_id]['u_turn_detected']:
+            color = (0, 255, 255)  # 유턴 감지된 객체는 계속 노란색으로 표시
+        else:
+            # 개체별 zone1, zone2 겹침 시간 추적
+            if np.any(roi[min(y2, height - 1), min(x1, width - 1)] > 0):
+                object_status[matched_id]['zone1_overlap_time'] = frame_count
+            if np.any(roi[min(y2, height - 1), min(x2, width - 1)] > 0):
+                object_status[matched_id]['zone2_overlap_time'] = frame_count
+
+            # 유턴 감지 여부에 따른 색상 설정
+            zone1_time = object_status[matched_id]['zone1_overlap_time']
+            zone2_time = object_status[matched_id]['zone2_overlap_time']
+            if zone1_time != -1 and zone2_time != -1:
+                if abs(zone1_time - zone2_time) <= time_threshold:
+                    color = (0, 255, 255)  # 유턴 감지 시 노란색
+                    object_status[matched_id]['u_turn_detected'] = True
+                    print(f"유턴 감지 - 개체 {matched_id}: 좌표 {center}, 유턴 상태")
+                else:
+                    color = (0, 255, 0)  # 기본 상태 초록색
+            else:
+                color = (0, 255, 0)  # 기본 상태 초록색
+
+        # 바운딩 박스 및 구역 표시
+        cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
+        cv2.circle(frame, center, 5, (255, 0, 0), -1)
+
+    # 현재 프레임에 없는 객체는 다음 프레임에 포함되지 않도록 필터링
+    object_status = {obj_id: status for obj_id, status in object_status.items() if obj_id in current_objects}
+
+    # 결과 프레임을 저장
+    out.write(frame)
+    frame_count += 1
+
+# 자원 해제
+cap.release()
+out.release()
