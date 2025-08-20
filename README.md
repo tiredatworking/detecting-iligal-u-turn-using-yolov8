@@ -10,3 +10,6 @@ normal cars making bbox with a green line and iligal cars shine with a red bbox.
 yellow bbox showing us when cars stop state with a yellow line more than 5min. 
 
 ![Image](https://github.com/user-attachments/assets/ac26270b-5c3c-465b-bc50-e74363edc478)
+
+
+<img width="1176" height="440" alt="Image" src="https://github.com/user-attachments/assets/90a954d7-9e6e-4406-8880-ed18be7e367c" />
