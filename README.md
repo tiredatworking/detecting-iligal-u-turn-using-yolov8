@@ -9,3 +9,4 @@ yolov8 and opencv together. (might opencv could deleted in the final version)
 normal cars making bbox with a green line and iligal cars shine with a red bbox. 
 yellow bbox showing us when cars stop state with a yellow line more than 5min. 
 
+![Uploading yolo project.jpg…]()
